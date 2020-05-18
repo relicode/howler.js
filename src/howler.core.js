@@ -12,6 +12,13 @@
 
   'use strict';
 
+  var IS_BROWSER = typeof window === 'object' && window !== null;
+  var IS_IOS = IS_BROWSER && /iPad|iPhone/.test(window.navigator && window.navigator.platform)
+
+  var HowlerAudioContext = IS_BROWSER
+    ? (window.AudioContext || window.webkitAudioContext)
+    : undefined;
+
   /** Global Methods **/
   /***************************************************************************/
 
@@ -305,17 +312,9 @@
       self._audioUnlocked = false;
       self.autoUnlock = false;
 
-      // Some mobile devices/platforms have distortion issues when opening/closing tabs and/or web views.
-      // Bugs in the browser (especially Mobile Safari) can cause the sampleRate to change from 44100 to 48000.
-      // By calling Howler.unload(), we create a new AudioContext with the correct sampleRate.
-      if (!self._mobileUnloaded && self.ctx.sampleRate !== 44100) {
-        self._mobileUnloaded = true;
-        self.unload();
-      }
-
       // Scratch buffer for enabling iOS to dispose of web audio buffers correctly, as per:
       // http://stackoverflow.com/questions/24119684
-      self._scratchBuffer = self.ctx.createBuffer(1, 1, 22050);
+      self._scratchBuffer = self.ctx.createBuffer(1, 1, self.ctx.sampleRate);
 
       // Call this method on touch start to create and play a buffer,
       // then check if the audio actually played to determine if
@@ -2454,6 +2453,34 @@
   };
 
   /**
+   * iOS safe AudioContext creator, derived from this
+   * {@link https://github.com/Jam3/ios-safe-audio-context|solution} addressing this
+   * {@link https://stackoverflow.com/questions/26336040/how-to-fix-changing-sample-rate-bug|bug}.
+   * @param {number} [audioSourceSampleRate=44100] - Sample of audio source in Hz
+   * @return {AudioContext/webkitAudioContext}
+   */
+  var createAudioContext = function(audioSourceSampleRate) {
+    var dummySource,
+      context = new HowlerAudioContext(),
+      sampleRate = typeof audioSourceSampleRate === 'number' ? audioSourceSampleRate : 44100;
+
+    // Check if hack is necessary. Only occurs in iOS6+ devices
+    // and only when you first boot the iPhone, or play a audio/video
+    // with a different sample rate
+    if (IS_IOS && context.sampleRate !== sampleRate) {
+      dummySource = context.createBufferSource();
+      dummySource.buffer = context.createBuffer(1, 1, sampleRate);
+      dummySource.connect(context.destination);
+      dummySource.start(0);
+      dummySource.disconnect();
+      context.close();
+      return new HowlerAudioContext();
+    }
+
+    return context;
+  };
+
+  /**
    * Setup the audio context when available, or switch to HTML5 Audio mode.
    */
   var setupAudioContext = function() {
@@ -2464,10 +2491,8 @@
 
     // Check if we are using Web Audio and setup the AudioContext if we are.
     try {
-      if (typeof AudioContext !== 'undefined') {
-        Howler.ctx = new AudioContext();
-      } else if (typeof webkitAudioContext !== 'undefined') {
-        Howler.ctx = new webkitAudioContext();
+      if (HowlerAudioContext) {
+        Howler.ctx = createAudioContext();
       } else {
         Howler.usingWebAudio = false;
       }
@@ -2482,12 +2507,11 @@
 
     // Check if a webview is being used on iOS8 or earlier (rather than the browser).
     // If it is, disable Web Audio as it causes crashing.
-    var iOS = (/iP(hone|od|ad)/.test(Howler._navigator && Howler._navigator.platform));
     var appVersion = Howler._navigator && Howler._navigator.appVersion.match(/OS (\d+)_(\d+)_?(\d+)?/);
     var version = appVersion ? parseInt(appVersion[1], 10) : null;
-    if (iOS && version && version < 9) {
-      var safari = /safari/.test(Howler._navigator && Howler._navigator.userAgent.toLowerCase());
-      if (Howler._navigator && !safari) {
+    if (IS_IOS && version && version < 9) {
+      var isSafari = /safari/i.test(Howler._navigator && Howler._navigator.userAgent);
+      if (Howler._navigator && isSafari) {
         Howler.usingWebAudio = false;
       }
     }
