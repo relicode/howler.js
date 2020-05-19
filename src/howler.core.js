@@ -13,7 +13,8 @@
   'use strict';
 
   var IS_BROWSER = typeof window === 'object' && window !== null;
-  var IS_IOS = IS_BROWSER && /iPad|iPhone/.test(window.navigator && window.navigator.platform)
+  var IS_IOS = IS_BROWSER && /iPad|iPhone/.test(window.navigator && window.navigator.platform);
+  var STEREO_CHANNELS = 2;
 
   var HowlerAudioContext = IS_BROWSER
     ? (window.AudioContext || window.webkitAudioContext)
@@ -51,6 +52,7 @@
       self._volume = 1;
       self._canPlayEvent = 'canplaythrough';
       self._navigator = (typeof window !== 'undefined' && window.navigator) ? window.navigator : null;
+      self._iosSafe = false;
 
       // Public properties.
       self.masterGain = null;
@@ -65,6 +67,22 @@
       // Setup the various state values for global tracking.
       self._setup();
 
+      return self;
+    },
+
+    /**
+     * Get/set the global iosSafe feature.
+     * @param  {boolean} [iosSafe] whether to apply iOS safe procedures.
+     * @return {Howler/boolean}     Returns self or iosSafe value.
+     */
+    iosSafe: function(iosSafe) {
+      var self = this || Howler;
+
+      if (typeof iosSafe !== 'boolean') {
+        return self._iosSafe;
+      }
+
+      self._iosSafe = iosSafe;
       return self;
     },
 
@@ -313,8 +331,14 @@
       self.autoUnlock = false;
 
       // Scratch buffer for enabling iOS to dispose of web audio buffers correctly, as per:
-      // http://stackoverflow.com/questions/24119684
-      self._scratchBuffer = self.ctx.createBuffer(1, 1, self.ctx.sampleRate);
+      // https://stackoverflow.com/questions/24119684
+      //
+      // 1-frame long scratch buffer needs to get created, as assigning to null will cause an exception.
+      self._scratchBuffer = self.ctx.createBuffer(
+        STEREO_CHANNELS,
+        1,
+        self.ctx.sampleRate
+      );
 
       // Call this method on touch start to create and play a buffer,
       // then check if the audio actually played to determine if
@@ -2146,13 +2170,16 @@
      */
     _cleanBuffer: function(node) {
       var self = this;
-      var isIOS = Howler._navigator && Howler._navigator.vendor.indexOf('Apple') >= 0;
-
       if (Howler._scratchBuffer && node.bufferSource) {
         node.bufferSource.onended = null;
         node.bufferSource.disconnect(0);
-        if (isIOS) {
-          try { node.bufferSource.buffer = Howler._scratchBuffer; } catch(e) {}
+        if (IS_IOS) {
+          try {
+            node.bufferSource.buffer = Howler._scratchBuffer;
+          } catch (e) {
+            // Chrome/FF will throw when .buffer is reassigned at any time.
+            // https://stackoverflow.com/questions/24119684/web-audio-api-memory-leaks-on-mobile-platforms
+          }
         }
       }
       node.bufferSource = null;
@@ -2456,20 +2483,18 @@
    * iOS safe AudioContext creator, derived from this
    * {@link https://github.com/Jam3/ios-safe-audio-context|solution} addressing this
    * {@link https://stackoverflow.com/questions/26336040/how-to-fix-changing-sample-rate-bug|bug}.
-   * @param {number} [audioSourceSampleRate=44100] - Sample of audio source in Hz
    * @return {AudioContext/webkitAudioContext}
    */
-  var createAudioContext = function(audioSourceSampleRate) {
-    var dummySource,
-      context = new HowlerAudioContext(),
-      sampleRate = typeof audioSourceSampleRate === 'number' ? audioSourceSampleRate : 44100;
+  var createAudioContext = function() {
+    var self = this || Howler;
+    var dummySource, context = new HowlerAudioContext();
 
     // Check if hack is necessary. Only occurs in iOS6+ devices
     // and only when you first boot the iPhone, or play a audio/video
     // with a different sample rate
-    if (IS_IOS && context.sampleRate !== sampleRate) {
+    if (self.iosSafe() && IS_IOS) {
       dummySource = context.createBufferSource();
-      dummySource.buffer = context.createBuffer(1, 1, sampleRate);
+      dummySource.buffer = self._scratchBuffer;
       dummySource.connect(context.destination);
       dummySource.start(0);
       dummySource.disconnect();
@@ -2491,17 +2516,11 @@
 
     // Check if we are using Web Audio and setup the AudioContext if we are.
     try {
-      if (HowlerAudioContext) {
-        Howler.ctx = createAudioContext();
-      } else {
-        Howler.usingWebAudio = false;
+      if (!HowlerAudioContext) {
+        throw new Error('HowlerAudioContext not available.');
       }
-    } catch(e) {
-      Howler.usingWebAudio = false;
-    }
-
-    // If the audio context creation still failed, set using web audio to false.
-    if (!Howler.ctx) {
+      Howler.ctx = createAudioContext();
+    } catch (e) {
       Howler.usingWebAudio = false;
     }
 
